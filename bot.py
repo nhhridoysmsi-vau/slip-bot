@@ -4,15 +4,14 @@ import base64
 import requests
 from flask import Flask, request
 
-# ── CONFIG ──
 TELEGRAM_TOKEN = "8636414515:AAFnkUylw7VQX4bewPU-0YBnR5icalAMsnE"
 GEMINI_KEY = "AIzaSyDrGJXy5MsQ30Nh54GAmmET2WnzaT_ntyA"
 TG_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 DB_FILE = "slips.json"
 
-app = Flask(__name__)
+application = Flask(__name__)
+app = application
 
-# ── DATABASE ──
 def load_db():
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
@@ -23,7 +22,6 @@ def save_db(data):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# ── GEMINI OCR ──
 def ocr_image(image_bytes, mime_type="image/jpeg"):
     b64 = base64.b64encode(image_bytes).decode()
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
@@ -39,7 +37,6 @@ def ocr_image(image_bytes, mime_type="image/jpeg"):
     d = r.json()
     return d["candidates"][0]["content"]["parts"][0]["text"].strip()
 
-# ── FUZZY SEARCH ──
 def lev(a, b):
     m, n = len(a), len(b)
     dp = [[0]*(n+1) for _ in range(m+1)]
@@ -57,8 +54,7 @@ def sim(a, b):
     if len(a) < 2 or len(b) < 2: return 0
     if b in a or a in b: return 0.85
     L, S = (a, b) if len(a) >= len(b) else (b, a)
-    d = lev(L, S)
-    return (len(L) - d) / len(L)
+    return (len(L) - lev(L, S)) / len(L)
 
 def search(query, slips):
     q = query.lower().strip()
@@ -68,19 +64,15 @@ def search(query, slips):
         txt = slip.get("text", "").lower()
         score = 0
         match_type = ""
-        # Full phrase
         if q in txt:
             score = 100; match_type = "exact"
-        # All words
         elif qwords and all(w in txt for w in qwords):
             score = 90; match_type = "exact"
-        # Some words
         else:
             matched = [w for w in qwords if len(w) > 1 and w in txt]
             if matched:
                 score = int(len(matched)/len(qwords)*70); match_type = "partial"
             else:
-                # Fuzzy
                 twords = txt.split()
                 best = 0
                 for qw in qwords:
@@ -95,73 +87,59 @@ def search(query, slips):
     results.sort(key=lambda x: -x[0])
     return results
 
-# ── TELEGRAM HELPERS ──
-def send_msg(chat_id, text, parse_mode="HTML"):
+def send_msg(chat_id, text):
     requests.post(f"{TG_URL}/sendMessage", json={
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": parse_mode
-    })
+        "chat_id": chat_id, "text": text, "parse_mode": "HTML"
+    }, timeout=10)
 
 def send_typing(chat_id):
-    requests.post(f"{TG_URL}/sendChatAction", json={"chat_id": chat_id, "action": "typing"})
+    requests.post(f"{TG_URL}/sendChatAction", json={
+        "chat_id": chat_id, "action": "typing"
+    }, timeout=5)
 
 def get_file_bytes(file_id):
-    r = requests.get(f"{TG_URL}/getFile", params={"file_id": file_id})
-    file_path = r.json()["result"]["file_path"]
-    r2 = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}")
+    r = requests.get(f"{TG_URL}/getFile", params={"file_id": file_id}, timeout=10)
+    fp = r.json()["result"]["file_path"]
+    r2 = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{fp}", timeout=30)
     return r2.content
 
-# ── WEBHOOK HANDLER ──
-@app.route("/webhook", methods=["POST"])
+@application.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
     if not data: return "ok"
-
     msg = data.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
     text = msg.get("text", "")
     photo = msg.get("photo")
     document = msg.get("document")
-
-    if not chat_id:
-        return "ok"
-
+    if not chat_id: return "ok"
     slips = load_db()
 
-    # ── PHOTO received ──
     if photo:
         send_typing(chat_id)
         send_msg(chat_id, "⏳ ছবি পড়ছি, একটু অপেক্ষা করুন...")
         try:
-            # Get highest quality photo
             file_id = photo[-1]["file_id"]
             img_bytes = get_file_bytes(file_id)
-            ocr_text = ocr_image(img_bytes, "image/jpeg")
-            slip = {
-                "id": len(slips) + 1,
-                "file_id": file_id,
-                "text": ocr_text
-            }
+            ocr_text = ocr_image(img_bytes)
+            slip = {"id": len(slips)+1, "file_id": file_id, "text": ocr_text}
             slips.append(slip)
             save_db(slips)
             send_msg(chat_id,
                 f"✅ <b>স্লিপ #{slip['id']} সেভ হয়েছে!</b>\n\n"
-                f"📝 পাওয়া লেখা:\n<code>{ocr_text[:500]}</code>\n\n"
-                f"মোট স্লিপ: {len(slips)}টি\n"
-                f"এখন যেকোনো নাম লিখে সার্চ করুন 🔍"
+                f"📝 পাওয়া লেখা:\n{ocr_text[:400]}\n\n"
+                f"মোট স্লিপ: {len(slips)}টি"
             )
         except Exception as e:
-            send_msg(chat_id, f"❌ ছবি পড়তে সমস্যা হয়েছে: {str(e)[:100]}")
+            send_msg(chat_id, f"❌ সমস্যা হয়েছে: {str(e)[:150]}")
         return "ok"
 
-    # ── DOCUMENT (image as file) ──
-    if document and document.get("mime_type", "").startswith("image/"):
+    if document and document.get("mime_type","").startswith("image/"):
         send_typing(chat_id)
         send_msg(chat_id, "⏳ ছবি পড়ছি...")
         try:
             file_id = document["file_id"]
-            mime = document.get("mime_type", "image/jpeg")
+            mime = document.get("mime_type","image/jpeg")
             img_bytes = get_file_bytes(file_id)
             ocr_text = ocr_image(img_bytes, mime)
             slip = {"id": len(slips)+1, "file_id": file_id, "text": ocr_text}
@@ -169,92 +147,72 @@ def webhook():
             save_db(slips)
             send_msg(chat_id,
                 f"✅ <b>স্লিপ #{slip['id']} সেভ!</b>\n\n"
-                f"📝 পাওয়া লেখা:\n<code>{ocr_text[:500]}</code>\n\n"
-                f"মোট: {len(slips)}টি স্লিপ"
+                f"📝 {ocr_text[:400]}\n\nমোট: {len(slips)}টি"
             )
         except Exception as e:
-            send_msg(chat_id, f"❌ সমস্যা: {str(e)[:100]}")
+            send_msg(chat_id, f"❌ সমস্যা: {str(e)[:150]}")
         return "ok"
 
-    # ── TEXT commands ──
     if text:
         if text.startswith("/start") or text.startswith("/help"):
             send_msg(chat_id,
                 "🔍 <b>স্লিপ সার্চ Bot</b>\n\n"
-                "📌 <b>কীভাবে ব্যবহার করবেন:</b>\n\n"
-                "1️⃣ স্লিপের ছবি পাঠান → Bot পড়ে সেভ করবে\n"
-                "2️⃣ যেকোনো নাম লিখুন → Bot খুঁজে দেবে\n\n"
+                "📌 <b>ব্যবহার:</b>\n"
+                "1️⃣ স্লিপের ছবি পাঠান → সেভ হবে\n"
+                "2️⃣ নাম লিখুন → খুঁজে দেবে\n\n"
                 "✅ বাংলা বা ইংরেজি দুটোতেই কাজ করে\n"
-                "✅ বানান একটু ভুল হলেও খুঁজবে\n\n"
-                "📋 <b>Commands:</b>\n"
-                "/list — সব স্লিপের লিস্ট\n"
-                "/count — মোট স্লিপ সংখ্যা\n"
-                "/clear — সব মুছুন\n"
-                "/help — সাহায্য"
+                "✅ বানান ভুল হলেও খুঁজবে\n\n"
+                "/count — মোট স্লিপ\n"
+                "/list — সব স্লিপ\n"
+                "/clear — সব মুছুন"
             )
-
         elif text.startswith("/count"):
             send_msg(chat_id, f"📊 মোট স্লিপ: <b>{len(slips)}টি</b>")
-
         elif text.startswith("/list"):
             if not slips:
-                send_msg(chat_id, "📂 কোনো স্লিপ নেই। ছবি পাঠান।")
+                send_msg(chat_id, "📂 কোনো স্লিপ নেই।")
             else:
                 lines = [f"📋 <b>মোট {len(slips)}টি স্লিপ:</b>\n"]
                 for s in slips[-20:]:
-                    preview = s["text"][:80].replace("\n", " ")
+                    preview = s["text"][:60].replace("\n"," ")
                     lines.append(f"#{s['id']}: {preview}...")
                 send_msg(chat_id, "\n".join(lines))
-
         elif text.startswith("/clear"):
             save_db([])
             send_msg(chat_id, "🗑️ সব স্লিপ মুছে ফেলা হয়েছে।")
-
         elif text.startswith("/"):
-            send_msg(chat_id, "❓ অজানা command। /help লিখুন।")
-
+            send_msg(chat_id, "❓ /help লিখুন।")
         else:
-            # SEARCH
             if not slips:
-                send_msg(chat_id,
-                    "📂 এখনো কোনো স্লিপ নেই।\n"
-                    "স্লিপের ছবি পাঠান, তারপর সার্চ করুন।"
-                )
+                send_msg(chat_id, "📂 এখনো কোনো স্লিপ নেই।\nআগে স্লিপের ছবি পাঠান।")
                 return "ok"
-
             send_typing(chat_id)
             results = search(text, slips)
-
             if not results:
-                send_msg(chat_id,
-                    f"🔍 <b>'{text}'</b> পাওয়া যায়নি।\n\n"
-                    f"ভিন্ন বানান বা ছোট শব্দ দিয়ে চেষ্টা করুন।"
-                )
+                send_msg(chat_id, f"🔍 '<b>{text}</b>' পাওয়া যায়নি।\nভিন্ন বানান বা ছোট শব্দ দিয়ে চেষ্টা করুন।")
             else:
-                mt_label = {"exact": "✅ পুরো মিল", "partial": "🔶 আংশিক মিল", "fuzzy": "🔸 কাছাকাছি"}
-                lines = [f"🔍 <b>'{text}'</b> — {len(results)}টি স্লিপ পাওয়া গেছে:\n"]
+                mt_label = {"exact":"✅ পুরো মিল","partial":"🔶 আংশিক","fuzzy":"🔸 কাছাকাছি"}
+                lines = [f"🔍 '<b>{text}</b>' — {len(results)}টি পাওয়া গেছে:\n"]
                 for score, mt, slip in results[:5]:
-                    label = mt_label.get(mt, "")
-                    preview = slip["text"][:200].replace("\n", " | ")
-                    lines.append(f"━━━━━━━━━━\n{label} — স্লিপ #{slip['id']}\n📄 {preview}\n")
+                    label = mt_label.get(mt,"")
+                    preview = slip["text"][:250].replace("\n"," | ")
+                    lines.append(f"━━━━━━━━\n{label} — স্লিপ #{slip['id']}\n{preview}\n")
                 if len(results) > 5:
-                    lines.append(f"\n... আরো {len(results)-5}টি পাওয়া গেছে। আরো নির্দিষ্ট করে লিখুন।")
+                    lines.append(f"\n... আরো {len(results)-5}টি আছে।")
                 send_msg(chat_id, "\n".join(lines))
-
     return "ok"
 
-@app.route("/", methods=["GET"])
+@application.route("/", methods=["GET"])
 def index():
-    return "Slip Search Bot is running!"
+    return "Slip Search Bot চলছে! ✅"
 
-@app.route("/set_webhook", methods=["GET"])
+@application.route("/set_webhook", methods=["GET"])
 def set_webhook():
-    url = request.args.get("url")
-    if not url:
-        return "url parameter needed"
+    url = request.args.get("url","")
+    if not url: return "url দিন"
     r = requests.get(f"{TG_URL}/setWebhook", params={"url": f"{url}/webhook"})
-    return r.json()
+    return str(r.json())
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    port = int(os.environ.get("PORT", 10000))
+    application.run(host="0.0.0.0", port=port)
